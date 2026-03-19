@@ -1,4 +1,4 @@
-# Spack-AI Diagnostic Bridge — GSoC 2026 Qualification Task
+# Spack-AI Diagnostic Bridge — 
 
 A three-stage pipeline that extracts Spack package metadata, compresses it into a token-efficient representation, and feeds it to a local or cloud LLM to generate Off-Leading-Edge (OLE) risk scenarios, then deduplicates the results before reporting.
 
