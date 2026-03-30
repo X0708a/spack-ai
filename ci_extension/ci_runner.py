@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import random
 import re
 import shlex
@@ -16,27 +15,17 @@ import sys
 from pathlib import Path
 from typing import Any
 
-DEFAULT_SCHEDULED_TESTS_PATH = Path("scheduled_tests.json")
-DEFAULT_OUTPUT_PATH = Path("ci_results.json")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from shared.config import CI_RESULTS_PATH, CI_SCHEDULED_TESTS_PATH
+from shared.utils import info, load_json, warn, write_json
+
+DEFAULT_SCHEDULED_TESTS_PATH = CI_SCHEDULED_TESTS_PATH
+DEFAULT_OUTPUT_PATH = CI_RESULTS_PATH
 DEFAULT_SEED = 17
 FAILURE_TYPES = ("ABI", "build", "dependency conflict")
-
-
-def info(message: str) -> None:
-    print(f"[info] {message}", file=sys.stderr)
-
-
-def warn(message: str) -> None:
-    print(f"[warn] {message}", file=sys.stderr)
-
-
-def load_json(path: Path, default: Any) -> Any:
-    if not path.exists():
-        return default
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return default
 
 
 def parse_args() -> argparse.Namespace:
@@ -143,7 +132,7 @@ def main() -> None:
         deterministic=args.deterministic,
         seed=args.seed,
     )
-    args.output.write_text(json.dumps(ci_results, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    write_json(args.output, ci_results)
     info(f"wrote {args.output} with {ci_results['result_count']} CI result(s)")
 
 

@@ -6,34 +6,28 @@ Schedule the highest-value OLE scenarios for the next CI run.
 from __future__ import annotations
 
 import argparse
-import json
-import re
 import sys
 from pathlib import Path
 from typing import Any
 
-from generate_scenarios import spec_fingerprint
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-DEFAULT_SCENARIOS_PATH = Path("scenarios.json")
-DEFAULT_SCORES_PATH = Path("scenario_scores.json")
-DEFAULT_VALIDATED_SPECS_PATH = Path("validated_specs.json")
-DEFAULT_OUTPUT_PATH = Path("scheduled_tests.json")
+from shared.config import (
+    CI_SCENARIO_SCORES_PATH,
+    CI_SCHEDULED_TESTS_PATH,
+    CI_VALIDATED_SPECS_PATH,
+    EVAL_SCENARIOS_PATH,
+)
+from shared.spec_distance import dependency_names, spec_fingerprint
+from shared.utils import info, load_json, write_json
+
+DEFAULT_SCENARIOS_PATH = EVAL_SCENARIOS_PATH
+DEFAULT_SCORES_PATH = CI_SCENARIO_SCORES_PATH
+DEFAULT_VALIDATED_SPECS_PATH = CI_VALIDATED_SPECS_PATH
+DEFAULT_OUTPUT_PATH = CI_SCHEDULED_TESTS_PATH
 DEFAULT_MAX_TESTS = 5
-
-SPEC_TOKEN_RE = re.compile(r"([A-Za-z0-9_][A-Za-z0-9_-]*)(@[^%\s+~^]+)?")
-
-
-def info(message: str) -> None:
-    print(f"[info] {message}", file=sys.stderr)
-
-
-def load_json(path: Path, default: Any) -> Any:
-    if not path.exists():
-        return default
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return default
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,18 +39,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tests", type=int, default=DEFAULT_MAX_TESTS)
     parser.add_argument("-o", "--output", type=Path, default=DEFAULT_OUTPUT_PATH)
     return parser.parse_args()
-
-
-def _dependency_names(spec: str) -> set[str]:
-    stripped = re.sub(r"^spack\s+install\s+", "", spec.strip())
-    names: set[str] = set()
-    for token in stripped.split()[1:]:
-        if not token.startswith("^"):
-            continue
-        match = SPEC_TOKEN_RE.match(token[1:])
-        if match:
-            names.add(match.group(1))
-    return names
 
 
 def load_validated_specs(path: Path, cli_specs: list[str]) -> set[str]:
@@ -93,7 +75,7 @@ def load_ranked_scenarios(scenarios_path: Path, scores_path: Path) -> list[dict[
         merged.update(score_map.get(fingerprint, {}))
         merged["fingerprint"] = fingerprint
         merged.setdefault("score", 0.0)
-        merged["dependency_names"] = sorted(_dependency_names(merged["spec"]))
+        merged["dependency_names"] = sorted(dependency_names(merged["spec"]))
         ranked.append(merged)
 
     ranked.sort(key=lambda item: (-float(item.get("score", 0.0)), item.get("fingerprint", "")))
@@ -187,7 +169,7 @@ def main() -> None:
     ranked = load_ranked_scenarios(args.scenarios, args.scores)
     validated_specs = load_validated_specs(args.validated_specs, args.validated_spec)
     scheduled = schedule_tests(ranked, max_tests=args.max_tests, validated_specs=validated_specs)
-    args.output.write_text(json.dumps(scheduled, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    write_json(args.output, scheduled)
     info(f"wrote {args.output} with {scheduled['selected_count']} scheduled test(s)")
 
 

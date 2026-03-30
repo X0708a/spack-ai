@@ -23,9 +23,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from shared.config import EVAL_ANALYSIS_CACHE_PATH, EVAL_SUMMARY_PATH
+from shared.utils import info, warn
+
 DEFAULT_PACKAGES = ("root", "geant4", "clhep")
-DEFAULT_OUTPUT = Path("summary.json")
-DEFAULT_CACHE_PATH = Path("analysis_cache.json")
+DEFAULT_OUTPUT = EVAL_SUMMARY_PATH
+DEFAULT_CACHE_PATH = EVAL_ANALYSIS_CACHE_PATH
 DEFAULT_TOKEN_BUDGET = 500
 
 WHEN_VARIANT_RE = re.compile(r"(?<![\w-])([+~])([A-Za-z0-9_][A-Za-z0-9_-]*)")
@@ -127,15 +134,6 @@ PROFILES = (
     CompressionProfile(name="guard-variants-no-build-top3", max_versions=3, omit_build_only=True),
     CompressionProfile(name="guard-variants-no-build-top2", max_versions=2, omit_build_only=True),
 )
-
-
-def info(message: str) -> None:
-    print(f"[info] {message}", file=sys.stderr)
-
-
-def warn(message: str) -> None:
-    print(f"[warn] {message}", file=sys.stderr)
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(

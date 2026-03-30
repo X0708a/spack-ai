@@ -8,7 +8,6 @@ Part 3: scenario similarity scoring and deduplication
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -16,15 +15,21 @@ import sys
 from pathlib import Path
 from typing import Any
 
-DEFAULT_SUMMARY_PATH = Path("summary.json")
-DEFAULT_MARKDOWN_PATH = Path("spack_spec.md")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from shared.config import EVAL_MARKDOWN_PATH, EVAL_SUMMARY_PATH
+from shared.spec_distance import parse_spec, spec_distance, spec_fingerprint
+from shared.utils import info, warn, write_json
+
+DEFAULT_SUMMARY_PATH = EVAL_SUMMARY_PATH
+DEFAULT_MARKDOWN_PATH = EVAL_MARKDOWN_PATH
 DEFAULT_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
 DEFAULT_DEDUP_THRESHOLD = 0.18
 TARGET_SCENARIO_COUNT = 3
 
 REQUIRED_SCENARIO_KEYS = ("spec", "primary", "risk_vector", "rationale")
-VERSION_RE = re.compile(r"\d+")
-SPEC_TOKEN_RE = re.compile(r"([A-Za-z0-9_][A-Za-z0-9_-]*)(@[^%\s+~^]+)?")
 
 
 class AnthropicUnavailableError(RuntimeError):
@@ -108,15 +113,6 @@ OUTPUT — strict JSON only, no markdown, no prose:
 {"scenarios":[{"spec":"spack install <pkg>@<ver> ^<dep>@<newest_ver>","primary":"<pkg>@<ver>","risk_vector":"<dep>@<newest_ver>","rationale":"<one sentence>"}]}
 """
 
-
-def info(message: str) -> None:
-    print(f"[info] {message}", file=sys.stderr)
-
-
-def warn(message: str) -> None:
-    print(f"[warn] {message}", file=sys.stderr)
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate and deduplicate OLE-risk Spack install scenarios.",
@@ -195,7 +191,7 @@ def parse_args() -> argparse.Namespace:
 
 def load_summary(path: Path) -> dict[str, Any]:
     if not path.exists():
-        raise FileNotFoundError(f"{path} not found. Run summarize.py first.")
+        raise FileNotFoundError(f"{path} not found. Run eval/summarize.py first.")
 
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -225,7 +221,7 @@ def changed_packages_from_summary(summary: dict[str, Any]) -> tuple[list[str], b
 
 def build_prompt_payload(summary: dict[str, Any]) -> dict[str, Any]:
     packages = summary["p"] if "p" in summary else summary.get("packages", {})
-    changed, has_delta_metadata = changed_packages_from_summary(summary)
+    changed, _ = changed_packages_from_summary(summary)
 
     payload = {
         "m": dict(summary.get("m", {})),
@@ -247,8 +243,8 @@ def call_anthropic(summary: dict[str, Any], model: str) -> list[dict[str, Any]]:
         raise AnthropicUnavailableError(
             "[error] the 'anthropic' package is not installed.\n"
             "  Install it with:  pip install anthropic\n"
-            "  Then re-run:      python3 generate_scenarios.py\n"
-            "  Or use mock mode: python3 generate_scenarios.py --mock-only"
+            "  Then re-run:      python3 eval/generate_scenarios.py\n"
+            "  Or use mock mode: python3 eval/generate_scenarios.py --mock-only"
         ) from exc
 
     try:
@@ -410,104 +406,6 @@ def _mock_scenarios() -> list[dict[str, Any]]:
     ]
 
 
-def _parse_version(version: str) -> tuple[int, ...]:
-    return tuple(int(part) for part in VERSION_RE.findall(version))
-
-
-def _jaccard_distance(left: set[str], right: set[str]) -> float:
-    union = left | right
-    if not union:
-        return 0.0
-    return 1.0 - (len(left & right) / len(union))
-
-
-def _version_distance(left: str, right: str) -> float:
-    left_tuple = _parse_version(left)
-    right_tuple = _parse_version(right)
-    if not left_tuple and not right_tuple:
-        return 0.0
-    if not left_tuple or not right_tuple:
-        return 1.0
-    if left_tuple == right_tuple:
-        return 0.0
-
-    max_len = max(len(left_tuple), len(right_tuple), 3)
-    padded_left = left_tuple + (0,) * (max_len - len(left_tuple))
-    padded_right = right_tuple + (0,) * (max_len - len(right_tuple))
-
-    major_gap = min(abs(padded_left[0] - padded_right[0]), 1)
-    minor_gap = min(abs(padded_left[1] - padded_right[1]), 5) / 5.0
-    patch_gap = min(abs(padded_left[2] - padded_right[2]), 10) / 10.0
-    return min(1.0, (0.6 * major_gap) + (0.25 * minor_gap) + (0.15 * patch_gap))
-
-
-def _primary_version_distance(left: str, right: str) -> float:
-    return _version_distance(left, right)
-
-
-def _dep_version_distance(left: dict[str, str], right: dict[str, str]) -> float:
-    common_dependencies = sorted(set(left) & set(right))
-    if not common_dependencies:
-        return 0.0
-
-    distances = [_version_distance(left[name], right[name]) for name in common_dependencies]
-    return sum(distances) / len(distances)
-
-
-def _parse_spec(spec_str: str) -> dict[str, Any]:
-    spec = re.sub(r"^spack\s+install\s+", "", spec_str.strip())
-    tokens = spec.split()
-    if not tokens:
-        raise ValueError("empty spec")
-
-    primary_match = SPEC_TOKEN_RE.match(tokens[0])
-    if not primary_match:
-        raise ValueError(f"unable to parse primary package from '{spec_str}'")
-
-    dependencies: dict[str, str] = {}
-    variants: set[str] = set()
-    for token in tokens[1:]:
-        if token.startswith("^"):
-            dep_match = SPEC_TOKEN_RE.match(token[1:])
-            if dep_match:
-                dependencies[dep_match.group(1)] = dep_match.group(2) or ""
-        elif token.startswith("+") or token.startswith("~"):
-            variants.add(token)
-
-    return {
-        "primary": primary_match.group(1),
-        "version": primary_match.group(2) or "",
-        "deps": dependencies,
-        "variants": variants,
-    }
-
-
-def spec_distance(spec_a: str, spec_b: str) -> float:
-    parsed_a = _parse_spec(spec_a)
-    parsed_b = _parse_spec(spec_b)
-
-    if parsed_a["primary"] != parsed_b["primary"]:
-        return 1.0
-
-    dep_distance = _jaccard_distance(set(parsed_a["deps"]), set(parsed_b["deps"]))
-    dep_version_distance = _dep_version_distance(parsed_a["deps"], parsed_b["deps"])
-    variant_distance = _jaccard_distance(parsed_a["variants"], parsed_b["variants"])
-    version_distance = _primary_version_distance(parsed_a["version"], parsed_b["version"])
-
-    score = (
-        (0.40 * dep_distance)
-        + (0.25 * dep_version_distance)
-        + (0.20 * version_distance)
-        + (0.15 * variant_distance)
-    )
-    return min(score, 1.0)
-
-
-def spec_fingerprint(spec: str) -> str:
-    normalised = re.sub(r"\s+", " ", spec.strip().lower())
-    return hashlib.sha1(normalised.encode("utf-8")).hexdigest()[:12]
-
-
 def validate_scenarios(raw_scenarios: list[dict[str, Any]]) -> list[dict[str, Any]]:
     validated: list[dict[str, Any]] = []
     for index, raw in enumerate(raw_scenarios, start=1):
@@ -526,7 +424,7 @@ def validate_scenarios(raw_scenarios: list[dict[str, Any]]) -> list[dict[str, An
             scenario["spec"] = "spack install " + scenario["spec"].lstrip()
 
         try:
-            parsed = _parse_spec(scenario["spec"])
+            parsed = parse_spec(scenario["spec"])
         except ValueError as exc:
             warn(f"dropping scenario {index}: {exc}")
             continue
@@ -646,10 +544,7 @@ def write_scenarios_json(scenarios: list[dict[str, Any]], path: Path) -> None:
         record["fingerprint"] = spec_fingerprint(scenario["spec"])
         records.append(record)
 
-    path.write_text(
-        json.dumps({"scenarios": records}, indent=2, ensure_ascii=True) + "\n",
-        encoding="utf-8",
-    )
+    write_json(path, {"scenarios": records})
     info(f"written JSON report to {path}")
 
 

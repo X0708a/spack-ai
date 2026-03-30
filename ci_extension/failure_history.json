@@ -3,20 +3,20 @@
     {
       "fingerprint": "40c2ef983e19",
       "spec": "spack install root@6.30.06 ^libxml2@2.13.0 ^clhep@2.4.7.1 +python +roofit",
-      "failure_type": "build",
-      "fail_count": 1
+      "failure_type": "dependency conflict",
+      "fail_count": 2
     },
     {
       "fingerprint": "8617c99eee6a",
       "spec": "spack install geant4@11.1.3 +gdml ^xerces-c@3.3.0 ^clhep@2.4.7.1",
-      "failure_type": "build",
-      "fail_count": 1
+      "failure_type": "dependency conflict",
+      "fail_count": 2
     },
     {
       "fingerprint": "f5ce4cb10dfa",
       "spec": "spack install root@6.28.12 ^clhep@2.4.7.1 ^zstd@1.5.6 ~opengl",
-      "failure_type": "ABI",
-      "fail_count": 1
+      "failure_type": "build",
+      "fail_count": 2
     }
   ]
 }

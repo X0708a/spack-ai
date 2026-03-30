@@ -9,19 +9,29 @@ history so CI can prioritize the most informative OLE scenarios first.
 from __future__ import annotations
 
 import argparse
-import json
-import re
 import sys
 from pathlib import Path
 from typing import Any
 
-from generate_scenarios import spec_distance, spec_fingerprint
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-DEFAULT_SCENARIOS_PATH = Path("scenarios.json")
-DEFAULT_SUMMARY_PATH = Path("summary.json")
-DEFAULT_OUTPUT_PATH = Path("scenario_scores.json")
-DEFAULT_FAILURE_HISTORY_PATH = Path("failure_history.json")
-DEFAULT_VALIDATED_SPECS_PATH = Path("validated_specs.json")
+from shared.config import (
+    CI_FAILURE_HISTORY_PATH,
+    CI_SCENARIO_SCORES_PATH,
+    CI_VALIDATED_SPECS_PATH,
+    EVAL_SCENARIOS_PATH,
+    EVAL_SUMMARY_PATH,
+)
+from shared.spec_distance import parse_spec, spec_distance, spec_fingerprint, version_distance
+from shared.utils import info, load_json, write_json
+
+DEFAULT_SCENARIOS_PATH = EVAL_SCENARIOS_PATH
+DEFAULT_SUMMARY_PATH = EVAL_SUMMARY_PATH
+DEFAULT_OUTPUT_PATH = CI_SCENARIO_SCORES_PATH
+DEFAULT_FAILURE_HISTORY_PATH = CI_FAILURE_HISTORY_PATH
+DEFAULT_VALIDATED_SPECS_PATH = CI_VALIDATED_SPECS_PATH
 
 DEFAULT_WEIGHTS = {
     "unbounded_dependency_count": 3.0,
@@ -29,23 +39,6 @@ DEFAULT_WEIGHTS = {
     "rarity_score": 1.25,
     "failure_history_weight": 2.5,
 }
-
-VERSION_RE = re.compile(r"\d+")
-SPEC_TOKEN_RE = re.compile(r"([A-Za-z0-9_][A-Za-z0-9_-]*)(@[^%\s+~^]+)?")
-
-
-def info(message: str) -> None:
-    print(f"[info] {message}", file=sys.stderr)
-
-
-def load_json(path: Path, default: Any) -> Any:
-    if not path.exists():
-        return default
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return default
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Score generated OLE scenarios for CI scheduling.")
@@ -87,51 +80,6 @@ def load_validated_specs(path: Path) -> list[str]:
     return specs
 
 
-def _parse_version(version: str) -> tuple[int, ...]:
-    return tuple(int(part) for part in VERSION_RE.findall(version))
-
-
-def _version_distance(left: str, right: str) -> float:
-    left_tuple = _parse_version(left)
-    right_tuple = _parse_version(right)
-    if not left_tuple and not right_tuple:
-        return 0.0
-    if not left_tuple or not right_tuple:
-        return 1.0
-    if left_tuple == right_tuple:
-        return 0.0
-
-    max_len = max(len(left_tuple), len(right_tuple), 3)
-    padded_left = left_tuple + (0,) * (max_len - len(left_tuple))
-    padded_right = right_tuple + (0,) * (max_len - len(right_tuple))
-
-    major_gap = min(abs(padded_left[0] - padded_right[0]), 1)
-    minor_gap = min(abs(padded_left[1] - padded_right[1]), 5) / 5.0
-    patch_gap = min(abs(padded_left[2] - padded_right[2]), 10) / 10.0
-    return min(1.0, (0.6 * major_gap) + (0.25 * minor_gap) + (0.15 * patch_gap))
-
-
-def _parse_spec(spec: str) -> dict[str, Any]:
-    stripped = re.sub(r"^spack\s+install\s+", "", spec.strip())
-    tokens = stripped.split()
-    primary = {"name": "", "version": ""}
-    dependencies: dict[str, str] = {}
-
-    if tokens:
-        match = SPEC_TOKEN_RE.match(tokens[0])
-        if match:
-            primary = {"name": match.group(1), "version": match.group(2) or ""}
-
-    for token in tokens[1:]:
-        if not token.startswith("^"):
-            continue
-        match = SPEC_TOKEN_RE.match(token[1:])
-        if match:
-            dependencies[match.group(1)] = match.group(2) or ""
-
-    return {"primary": primary, "dependencies": dependencies}
-
-
 def _unbounded_dependency_count(scenario: dict[str, Any], packages: dict[str, dict[str, Any]]) -> int:
     primary_name = scenario.get("primary", "").split("@", 1)[0]
     package = packages.get(primary_name, {})
@@ -145,7 +93,7 @@ def _version_distance_from_latest(scenario: dict[str, Any], packages: dict[str, 
     package = packages.get(primary_name, {})
     versions = package.get("vs", []) if isinstance(package, dict) else []
     latest = versions[0] if versions else ""
-    return _version_distance(primary_version, latest)
+    return version_distance(primary_version, latest)
 
 
 def _rarity_score(spec: str, historical_specs: list[str]) -> float:
@@ -204,15 +152,15 @@ def score_scenarios(
             + (weights["failure_history_weight"] * components["failure_history_weight"])
         )
 
-        parsed = _parse_spec(spec)
+        parsed = parse_spec(spec)
         scored.append(
             {
                 **scenario,
                 "fingerprint": fingerprint,
                 "score": round(score, 6),
                 "components": components,
-                "dependency_names": sorted(parsed["dependencies"]),
-                "primary_package": parsed["primary"]["name"],
+                "dependency_names": sorted(parsed["deps"]),
+                "primary_package": parsed["primary"],
             }
         )
 
@@ -240,7 +188,7 @@ def main() -> None:
         validated_specs=validated_specs,
         previous_scores=previous_scores,
     )
-    args.output.write_text(json.dumps(result, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    write_json(args.output, result)
     info(f"wrote {args.output} with {result['scenario_count']} scored scenario(s)")
 
 

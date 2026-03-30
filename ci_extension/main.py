@@ -11,16 +11,28 @@ import subprocess
 import sys
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 import ci_runner
 import feedback
 import scheduler
 import scoring
+from shared.config import (
+    CI_FAILURE_HISTORY_PATH,
+    CI_RESULTS_PATH,
+    CI_SCENARIO_SCORES_PATH,
+    CI_SCHEDULED_TESTS_PATH,
+    CI_VALIDATED_SPECS_PATH,
+    EVAL_GENERATE_SCRIPT,
+    EVAL_SCENARIOS_PATH,
+    EVAL_SUMMARY_PATH,
+    EVAL_SUMMARIZE_SCRIPT,
+)
+from shared.utils import info, write_json
 
 DEFAULT_MAX_TESTS = 5
-
-
-def info(message: str) -> None:
-    print(f"[info] {message}", file=sys.stderr)
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,13 +44,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=ci_runner.DEFAULT_SEED)
     parser.add_argument("--real-spack", action="store_true")
     parser.add_argument("--validated-spec", action="append", default=[])
-    parser.add_argument("--summary", type=Path, default=Path("summary.json"))
-    parser.add_argument("--scenarios", type=Path, default=Path("scenarios.json"))
-    parser.add_argument("--scores", type=Path, default=Path("scenario_scores.json"))
-    parser.add_argument("--schedule", type=Path, default=Path("scheduled_tests.json"))
-    parser.add_argument("--ci-results", type=Path, default=Path("ci_results.json"))
-    parser.add_argument("--failure-history", type=Path, default=Path("failure_history.json"))
-    parser.add_argument("--validated-specs-cache", type=Path, default=Path("validated_specs.json"))
+    parser.add_argument("--summary", type=Path, default=EVAL_SUMMARY_PATH)
+    parser.add_argument("--scenarios", type=Path, default=EVAL_SCENARIOS_PATH)
+    parser.add_argument("--scores", type=Path, default=CI_SCENARIO_SCORES_PATH)
+    parser.add_argument("--schedule", type=Path, default=CI_SCHEDULED_TESTS_PATH)
+    parser.add_argument("--ci-results", type=Path, default=CI_RESULTS_PATH)
+    parser.add_argument("--failure-history", type=Path, default=CI_FAILURE_HISTORY_PATH)
+    parser.add_argument("--validated-specs-cache", type=Path, default=CI_VALIDATED_SPECS_PATH)
     return parser.parse_args()
 
 
@@ -63,7 +75,7 @@ def _changed_packages(summary_path: Path) -> list[str]:
 def main() -> None:
     args = parse_args()
 
-    summarize_cmd = [sys.executable, "summarize.py"]
+    summarize_cmd = [sys.executable, str(EVAL_SUMMARIZE_SCRIPT)]
     if args.force_static:
         summarize_cmd.append("--force-static")
     _run_python_step(summarize_cmd)
@@ -73,7 +85,7 @@ def main() -> None:
         info("No metadata deltas detected after summarization; skipping scheduling pipeline.")
         return
 
-    generate_cmd = [sys.executable, "generate_scenarios.py", "--output-json", str(args.scenarios)]
+    generate_cmd = [sys.executable, str(EVAL_GENERATE_SCRIPT), "--output-json", str(args.scenarios)]
     if args.mock_only:
         generate_cmd.append("--mock-only")
     for spec in args.validated_spec:
@@ -87,7 +99,7 @@ def main() -> None:
         validated_specs=scoring.load_validated_specs(args.validated_specs_cache),
         previous_scores=scoring.load_json(args.scores, {"scenarios": []}).get("scenarios", []),
     )
-    args.scores.write_text(json.dumps(scored, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    write_json(args.scores, scored)
     info(f"wrote {args.scores}")
 
     scheduled = scheduler.schedule_tests(
@@ -95,7 +107,7 @@ def main() -> None:
         max_tests=args.max_tests,
         validated_specs=scheduler.load_validated_specs(args.validated_specs_cache, args.validated_spec),
     )
-    args.schedule.write_text(json.dumps(scheduled, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    write_json(args.schedule, scheduled)
     info(f"wrote {args.schedule}")
 
     ci_payload = ci_runner.run_ci(
@@ -104,7 +116,7 @@ def main() -> None:
         deterministic=args.deterministic,
         seed=args.seed,
     )
-    args.ci_results.write_text(json.dumps(ci_payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    write_json(args.ci_results, ci_payload)
     info(f"wrote {args.ci_results}")
 
     failure_history = feedback.update_failure_history(
@@ -115,15 +127,12 @@ def main() -> None:
         ci_payload.get("results", []),
         feedback.load_json(args.validated_specs_cache, {"validated_specs": []}),
     )
-    args.failure_history.write_text(json.dumps(failure_history, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
-    args.validated_specs_cache.write_text(
-        json.dumps(validated_specs, indent=2, ensure_ascii=True) + "\n",
-        encoding="utf-8",
-    )
+    write_json(args.failure_history, failure_history)
+    write_json(args.validated_specs_cache, validated_specs)
     info(f"updated {args.failure_history} and {args.validated_specs_cache}")
 
     boosted = feedback.apply_failure_feedback(scored, failure_history)
-    args.scores.write_text(json.dumps(boosted, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    write_json(args.scores, boosted)
     info(f"applied feedback-aware boosts to {args.scores}")
 
 

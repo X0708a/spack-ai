@@ -8,9 +8,9 @@
       "risk_vector": "zstd@1.5.6",
       "fingerprint": "f5ce4cb10dfa",
       "batch_id": "batch-1",
-      "score": 43.95,
+      "score": 43.2,
       "status": "fail",
-      "failure_type": "ABI",
+      "failure_type": "build",
       "detail": "deterministic mock"
     },
     {
@@ -19,9 +19,9 @@
       "risk_vector": "libxml2@2.13.0",
       "fingerprint": "40c2ef983e19",
       "batch_id": "batch-1",
-      "score": 43.57,
+      "score": 42.82,
       "status": "fail",
-      "failure_type": "build",
+      "failure_type": "dependency conflict",
       "detail": "deterministic mock"
     },
     {
@@ -30,9 +30,9 @@
       "risk_vector": "xerces-c@3.3.0",
       "fingerprint": "8617c99eee6a",
       "batch_id": "batch-1",
-      "score": 37.41,
+      "score": 36.66,
       "status": "fail",
-      "failure_type": "build",
+      "failure_type": "dependency conflict",
       "detail": "deterministic mock"
     }
   ]

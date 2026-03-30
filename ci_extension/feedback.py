@@ -9,31 +9,27 @@ configurations that are close to prior failures.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 from typing import Any
 
-from generate_scenarios import spec_distance, spec_fingerprint
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-DEFAULT_CI_RESULTS_PATH = Path("ci_results.json")
-DEFAULT_FAILURE_HISTORY_PATH = Path("failure_history.json")
-DEFAULT_VALIDATED_SPECS_PATH = Path("validated_specs.json")
-DEFAULT_SCENARIO_SCORES_PATH = Path("scenario_scores.json")
+from shared.config import (
+    CI_FAILURE_HISTORY_PATH,
+    CI_RESULTS_PATH,
+    CI_SCENARIO_SCORES_PATH,
+    CI_VALIDATED_SPECS_PATH,
+)
+from shared.spec_distance import spec_distance, spec_fingerprint
+from shared.utils import info, load_json, write_json
 
-
-def info(message: str) -> None:
-    print(f"[info] {message}", file=sys.stderr)
-
-
-def load_json(path: Path, default: Any) -> Any:
-    if not path.exists():
-        return default
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return default
-
+DEFAULT_CI_RESULTS_PATH = CI_RESULTS_PATH
+DEFAULT_FAILURE_HISTORY_PATH = CI_FAILURE_HISTORY_PATH
+DEFAULT_VALIDATED_SPECS_PATH = CI_VALIDATED_SPECS_PATH
+DEFAULT_SCENARIO_SCORES_PATH = CI_SCENARIO_SCORES_PATH
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Update failure history and validated caches from CI results.")
@@ -128,14 +124,14 @@ def main() -> None:
     failure_history = update_failure_history(ci_results, load_json(args.failure_history, {"failures": []}))
     validated_specs = update_validated_specs(ci_results, load_json(args.validated_specs, {"validated_specs": []}))
 
-    args.failure_history.write_text(json.dumps(failure_history, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
-    args.validated_specs.write_text(json.dumps(validated_specs, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    write_json(args.failure_history, failure_history)
+    write_json(args.validated_specs, validated_specs)
     info(f"updated {args.failure_history} and {args.validated_specs}")
 
     if args.scenario_scores.exists():
         scores_payload = load_json(args.scenario_scores, {"scenarios": []})
         boosted = apply_failure_feedback(scores_payload, failure_history)
-        args.scenario_scores.write_text(json.dumps(boosted, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+        write_json(args.scenario_scores, boosted)
         info(f"applied failure-aware score boosts to {args.scenario_scores}")
 
 
