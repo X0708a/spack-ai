@@ -1,46 +1,88 @@
-# Spack-AI Diagnostic Bridge — 
+# Spack-AI Diagnostic Bridge
 
-A three-stage pipeline that extracts Spack package metadata, compresses it into a token-efficient representation, and feeds it to a local or cloud LLM to generate Off-Leading-Edge (OLE) risk scenarios, then deduplicates the results before reporting.
+Spack-AI Diagnostic Bridge is a CI-oriented research prototype that turns Spack
+package metadata into targeted Off-Leading-Edge (OLE) test scenarios.
 
-**Key Features**
-- Token-bounded summarization (<500 tokens for scalable LLM payloads)
-- LLM-agnostic design (local LM Studio + Anthropic API + deterministic fallback)
-- Unbounded dependency detection — the primary driver of OLE risk
-- Weighted spec distance metric for deduplication
-- CI-aware exclusion of previously validated specs via `--validated-spec`
+The pipeline starts with Spack recipe metadata, compresses it into a token-aware
+summary for an LLM, generates risky `spack install` configurations, deduplicates
+them, and then extends those scenarios into scoring, scheduling, simulated CI,
+and feedback-driven reprioritization.
 
----
+## Key Features
 
-## Mapping to Qualification Task
+- Token-bounded metadata summarization under 500 tokens
+- Live `spack info --json` support with static fallback data
+- OLE detection centered on unbounded dependency edges
+- LLM-agnostic generation with Anthropic, LM Studio, and deterministic fallback
+- Weighted scenario deduplication with SHA-1 fingerprints
+- Incremental metadata caching for CI delta runs
+- Scenario scoring, batching, CI simulation, and feedback-aware re-ranking
+- Exclusion of previously validated specs via `--validated-spec`
 
-- **Part 1 — Metadata Extraction:** `summarize.py` extracts version ranges, variants, and unbounded dependencies (missing upper version bounds) into a token-bounded JSON summary (<500 tokens). The summarizer flags every `depends_on("foo")` or `depends_on("foo@X:")` constraint with `"u":1` — these are the primary drivers of OLE risk.
-- **Part 2 — Scenario Generation:** `generate_scenarios.py` feeds the summary to an LLM (LM Studio or Anthropic) with a Spack-specific system prompt that asks for configurations where a middle-aged primary version is paired with the newest available version of an unbounded dependency — exactly the class of risk current CI ignores.
-- **Part 3 — Deduplication:** `spec_distance()` computes a weighted similarity score across dep sets, dep versions, primary versions, and variant flags. Previously validated CI specs are passed via `--validated-spec` and excluded before reporting. A SHA-1 fingerprint per scenario enables cheap cache lookups across runs.
+## Pipeline
 
----
+1. `summarize.py`
+   Extracts package metadata for `root`, `geant4`, and `clhep`, then writes a
+   compact `summary.json`.
+2. `generate_scenarios.py`
+   Uses the summary as LLM input and emits three deduplicated OLE-risk specs in
+   `spack_spec.md` and optional `scenarios.json`.
+3. `scoring.py`
+   Scores each scenario into `scenario_scores.json` using:
+   unbounded dependency count, version distance from latest, rarity, and failure
+   history.
+4. `scheduler.py`
+   Chooses the highest-value scenarios for the next CI run, avoids validated or
+   duplicate fingerprints, and groups overlapping dependency graphs into
+   `scheduled_tests.json`.
+5. `ci_runner.py`
+   Simulates CI outcomes in deterministic or mock mode, with optional real
+   `spack spec` checks, and writes `ci_results.json`.
+6. `feedback.py`
+   Updates `failure_history.json`, `validated_specs.json`, and boosts nearby
+   scenarios using the existing `spec_distance()` similarity metric.
+7. `main.py`
+   Runs the end-to-end pipeline in one command for CI-style execution.
 
-## Gist Contents
+## Repository Contents
 
 | File | Description |
 |---|---|
-| `summarize.py` | Extracts Spack metadata and emits a token-bounded summary |
-| `summary.json` | Sample output from `summarize.py` |
-| `generate_scenarios.py` | Calls an LLM to generate OLE-risk specs, deduplicates, reports |
-| `scenarios.json` | Real LM Studio output from this run |
-| `spack_spec.md` | Three at-risk Spack specs with rationale and fingerprint |
-| `prompt_logic.md` | System prompt design and reasoning |
-| `writeup.md` | Scaling strategy for 100+ package stacks |
-
----
+| `summarize.py` | Metadata extraction, compression, and fingerprint cache handling |
+| `generate_scenarios.py` | LLM-backed OLE generation, validation, and deduplication |
+| `scoring.py` | Scenario ranking logic and score artifact generation |
+| `scheduler.py` | CI-aware test selection and dependency-overlap batching |
+| `ci_runner.py` | Mock, deterministic, or optional real-Spack execution layer |
+| `feedback.py` | Failure history updates and feedback-aware score boosting |
+| `main.py` | End-to-end orchestration entry point |
+| `summary.json` | Compact metadata payload for LLM analysis |
+| `scenarios.json` | Structured scenario output |
+| `scenario_scores.json` | Per-scenario priority scores and score components |
+| `scheduled_tests.json` | Selected scenarios and CI batch layout |
+| `ci_results.json` | Simulated or real CI outcomes |
+| `failure_history.json` | Accumulated failure memory for future scoring |
+| `validated_specs.json` | Cache of successful specs to suppress retesting |
+| `prompt_logic.md` | Prompt design notes |
+| `spack_spec.md` | Human-readable risky spec report |
+| `writeup.md` | Scaling and CI strategy notes |
 
 ## Quick Start
 
-```bash
-# Step 1 — extract metadata
-python3 summarize.py --force-static        # no Spack needed
-python3 summarize.py                        # uses live Spack if installed
+### Summarize and Generate Scenarios
 
-# Step 2a — run with LM Studio (local, no API key)
+```bash
+# Static mode: no Spack installation required
+python3 summarize.py --force-static
+
+# Live mode: uses Spack when available
+python3 summarize.py
+
+# Anthropic-backed generation
+pip install anthropic
+export ANTHROPIC_API_KEY=sk-ant-...
+python3 generate_scenarios.py --output-json scenarios.json
+
+# Local LM Studio generation
 pip install openai
 python3 generate_scenarios.py \
   --lm-studio \
@@ -48,162 +90,89 @@ python3 generate_scenarios.py \
   --lm-studio-model "qwen2.5-coder-7b-instruct-mlx" \
   --output-json scenarios.json
 
-# Step 2b — run with Anthropic API
-pip install anthropic
-export ANTHROPIC_API_KEY=sk-ant-...
-python3 generate_scenarios.py --output-json scenarios.json
-
-# Step 2c — deterministic fallback (no API, no LM Studio)
+# Deterministic fallback generation
 python3 generate_scenarios.py --mock-only --output-json scenarios.json
+```
 
-# Suppress already-validated CI specs
+### Run the CI-Aware Extension
+
+```bash
+# Full orchestrated run
+python3 main.py --mock-only --deterministic --max-tests 5 --force-static
+
+# Or run the downstream stages individually
+python3 scoring.py scenarios.json
+python3 scheduler.py --max-tests 5
+python3 ci_runner.py --deterministic
+python3 feedback.py
+```
+
+### Exclude Known-Good Specs
+
+```bash
 python3 generate_scenarios.py \
+  --validated-spec "spack install root@6.30.06 ^libxml2@2.13.0 ^clhep@2.4.7.1 +python +roofit"
+
+python3 scheduler.py \
   --validated-spec "spack install root@6.30.06 ^libxml2@2.13.0 ^clhep@2.4.7.1 +python +roofit"
 ```
 
----
+## Scenario Scoring Model
 
-## LLM-Backed Scenario Generation
+`scoring.py` computes:
 
-Scenarios are generated by feeding the compressed `summary.json` (472 tokens)
-into an LLM using the system prompt defined in `generate_scenarios.py`.
-The summarizer highlights unbounded dependencies (missing upper version bounds),
-which are the primary drivers of OLE risk scenarios.
-The script supports three backends — Anthropic API, local LM Studio, and a
-deterministic fallback — with identical validation and deduplication logic
-regardless of which backend runs.
-
-### This submission: qwen2.5-coder-7b-instruct-mlx via LM Studio
-
-Results were generated locally on an M2 MacBook Pro using
-`qwen2.5-coder-7b-instruct-mlx` served by LM Studio at
-`http://localhost:1234/v1`. No API key was used.
-
-**Raw model output (unedited):**
-
-```json
-{
-  "scenarios": [
-    {
-      "spec": "spack install root@6.28.12 +python clhep@2.4.7.1",
-      "primary": "root@6.28.12",
-      "risk_vector": "clhep@2.4.7.1",
-      "rationale": "The combination of root 6.28.12 and clhep 2.4.7.1 may break due to an ABI change in the newer clhep version."
-    },
-    {
-      "spec": "spack install geant4@11.0.4 +python clhep@2.4.7.1",
-      "primary": "geant4@11.0.4",
-      "risk_vector": "clhep@2.4.7.1",
-      "rationale": "The combination of geant4 11.0.4 and clhep 2.4.7.1 may break due to an ABI change in the newer clhep version."
-    },
-    {
-      "spec": "spack install geant4@10.7.4 +python clhep@2.4.7.1",
-      "primary": "geant4@10.7.4",
-      "risk_vector": "clhep@2.4.7.1",
-      "rationale": "The combination of geant4 10.7.4 and clhep 2.4.7.1 may break due to an ABI change in the newer clhep version."
-    }
-  ]
-}
+```text
+score(spec) =
+  w1 * unbounded_dependency_count +
+  w2 * version_distance_from_latest +
+  w3 * rarity_score +
+  w4 * failure_history_weight
 ```
 
-**LM Studio server log (screenshot evidence of real inference):**
+Default weights:
 
-```
-2026-03-18 21:50:26  [INFO]  [qwen2.5-coder-7b-instruct-mlx] Running chat completion on conversation with 2 messages.
-2026-03-18 21:50:26  [INFO]  [qwen2.5-coder-7b-instruct-mlx] Prompt processing progress: 0.0%
-2026-03-18 21:51:19  [INFO]  [qwen2.5-coder-7b-instruct-mlx] Model generated tool calls:  []
-2026-03-18 21:51:19  [INFO]  [qwen2.5-coder-7b-instruct-mlx] Generated prediction:
-  model:             qwen2.5-coder-7b-instruct-mlx
-  prompt_tokens:     1152
-  completion_tokens: 360
-  total_tokens:      1512
-  finish_reason:     stop
-```
+- `unbounded_dependency_count = 3.0`
+- `version_distance_from_latest = 2.0`
+- `rarity_score = 1.25`
+- `failure_history_weight = 2.5`
 
-The server log confirms the model ran a full inference pass — 1152 prompt tokens
-(summary JSON + system prompt) processed, 360 completion tokens generated, no
-tool calls, clean stop. This is not fallback output.
+This favors high-risk OLE candidates, middle-aged primary versions, configs not
+recently explored, and neighborhoods near prior failures.
 
-**What the pipeline did with this output:**
+## CI-Aware Behavior
 
-- Parsed the bare JSON array correctly (model returned `{...}` wrapper this run)
-- Dropped scenario 3 (`geant4@10.7.4` too similar to `geant4@11.0.4`,
-  `distance=0.170 < threshold=0.180`) — deduplication working correctly
-- Topped up with one fallback scenario to reach the required count of 3
-- Final output: `source: lm-studio` in `scenarios.json` and `spack_spec.md`
+- Metadata fingerprints in `analysis_cache.json` avoid re-running downstream
+  analysis when package metadata has not changed.
+- `main.py` short-circuits the scheduling pipeline when `summary.json` reports
+  no changed packages.
+- `scheduler.py` removes duplicate fingerprints and previously validated specs.
+- `feedback.py` boosts scenarios similar to recent failures using the existing
+  `spec_distance()` metric, preserving the original deduplication design.
 
-**What the model got right:**
+## Deduplication
 
-- Middle-aged primary versions: `root@6.28.12` (vs[2]), `geant4@11.0.4` (vs[2])
-- Correct OLE direction: old primary + newest available dep (`clhep@2.4.7.1`)
-- Correct `risk_vector` format: `dep@version`
+`generate_scenarios.py` uses a weighted distance over:
 
-**Known limitation (handled by the pipeline):**
+- dependency-set Jaccard distance
+- dependency-version distance
+- primary-version distance
+- variant-set distance
 
-The model occasionally omits the `^` caret prefix in dependency specs
-(`clhep@2.4.7.1` instead of `^clhep@2.4.7.1`). This is handled by:
-
-- relying on the structured `risk_vector` field for validation, not the spec string
-- the `--small-model` flag, which adds explicit WRONG/RIGHT syntax examples to the prompt
-- future post-processing normalisation can inject `^` automatically if needed
-
-The pipeline produced correct `source: lm-studio` output despite the formatting
-inconsistency, which demonstrates robustness to imperfect model output.
-
----
+This keeps adjacent variants of the same OLE idea from crowding out the final
+report while still preserving materially different dependency-risk vectors.
 
 ## Exit Codes
 
 | Code | Meaning |
 |---|---|
-| 0 | success |
-| 1 | bad input (missing or malformed `summary.json`) |
-| 2 | could not assemble 3 distinct scenarios after deduplication |
-| 3 | `anthropic` package not installed — run `pip install anthropic` |
+| `0` | success |
+| `1` | bad input such as missing or malformed summary data |
+| `2` | could not assemble 3 distinct scenarios after deduplication |
+| `3` | `anthropic` package is missing |
 
----
+## Notes
 
-## Deduplication
-
-```bash
-python3 generate_scenarios.py --mock-only --demo-dedup
-```
-
-```
--- Deduplication demo --
-[warn] deduplicated scenario 'spack install root@6.30.07 ...' (distance=0.003, threshold=0.180)
-input=4 output=3 threshold=0.18
-
--- Pairwise distances --
-scenario 1 vs 2: 1.000
-scenario 1 vs 3: 0.455
-scenario 2 vs 3: 1.000
-```
-
-`spec_distance()` uses a 4-component weighted score:
-
-| Component | Weight | What it measures |
-|---|---|---|
-| dep-set Jaccard | 0.40 | which dependencies are present |
-| dep-version distance | 0.25 | same dep, different pinned version |
-| primary version distance | 0.20 | how far apart the primary releases are |
-| variant set Jaccard | 0.15 | enabled/disabled feature flags |
-
-Previously validated CI specs are passed via `--validated-spec` and treated as
-an exclusion list. Each scenario carries a SHA-1 fingerprint for cheap cache
-lookups across runs.
-
----
-
-## Model Compatibility Notes
-
-| Model | Size | Flag needed | Quality |
-|---|---|---|---|
-| `qwen2.5-coder-7b-instruct-mlx` | ~4.5 GB | none | Good — used for this submission |
-| `qwen2.5-coder-3b-instruct` | ~2.0 GB | `--small-model` | Acceptable |
-| `mistral-7b-instruct-v0.3 Q4_K_M` | ~4.1 GB | none | Best for 8 GB machines |
-| Anthropic `claude-sonnet-4` | API | none | Highest quality |
-
-The `--small-model` flag swaps in a simplified prompt with explicit WRONG/RIGHT
-examples for Spack syntax and OLE direction — designed for models under 7B that
-struggle with abstract multi-rule prompts.
+- The project works in environments without Spack installed.
+- The CI extension does not require an LLM when `--mock-only` is used.
+- Deterministic mode is intended for repeatable tests and qualification demos.
+- The canonical repository location is [aashirvad08/spack-ai](https://github.com/aashirvad08/spack-ai).
