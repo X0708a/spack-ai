@@ -72,6 +72,43 @@ Return strict JSON only, no markdown fences and no extra prose:
 """
 
 
+# Simplified prompt for small local models (< 7B parameters).
+# Adds WRONG/RIGHT syntax examples and explicit version-index rules
+# because small models cannot reliably infer these from abstract descriptions.
+SMALL_MODEL_SYSTEM_PROMPT = """You are a Spack package compatibility analyst. Find Off-Leading-Edge (OLE) risks.
+
+OLE DEFINITION
+An OLE risk is: OLD primary package + BRAND NEW dependency version.
+Example: root@6.28 (old) paired with libxml2@2.13 (newest available).
+This is risky because root@6.28 was never tested with libxml2@2.13.
+
+RULES — follow exactly:
+1. PRIMARY VERSION: use vs[1], vs[2], or vs[3] — never vs[0] which is newest.
+2. DEPENDENCY VERSION: pick the NEWEST plausible release of an unbounded dep (u=1).
+   WRONG: ^clhep@2.4.1.0  (recipe lower bound — not a new release)
+   RIGHT: ^clhep@2.4.7.1  (newest version available)
+3. SPACK SYNTAX: deps MUST use the ^ caret prefix.
+   WRONG: spack install root@6.30.06 clhep@2.4.7.1
+   RIGHT: spack install root@6.30.06 ^clhep@2.4.7.1
+4. VARIANT GUARDS: if a dep has "w" field such as "+gdml", include that flag.
+5. RATIONALE: one sentence naming a specific ABI, parser, or API break.
+
+INPUT
+  vs = versions newest-first. Use vs[1] or vs[2] as primary.
+  d  = deps. Only use where u=1.
+  v  = recipe constraint. IGNORE this — pick the NEWEST release instead.
+  w  = variant guard to include in spec.
+
+EXAMPLE
+vs=["6.32.02","6.30.06","6.28.12"], dep libxml2 u=1:
+  -> spack install root@6.30.06 ^libxml2@2.13.0
+  primary=root@6.30.06, risk_vector=libxml2@2.13.0
+
+OUTPUT — strict JSON only, no markdown, no prose:
+{"scenarios":[{"spec":"spack install <pkg>@<ver> ^<dep>@<newest_ver>","primary":"<pkg>@<ver>","risk_vector":"<dep>@<newest_ver>","rationale":"<one sentence>"}]}
+"""
+
+
 def info(message: str) -> None:
     print(f"[info] {message}", file=sys.stderr)
 
@@ -124,6 +161,29 @@ def parse_args() -> argparse.Namespace:
         "--mock-only",
         action="store_true",
         help="Skip the Anthropic API and use the deterministic fallback scenarios.",
+    )
+    parser.add_argument(
+        "--lm-studio",
+        action="store_true",
+        help="Use a local LM Studio server instead of the Anthropic API.",
+    )
+    parser.add_argument(
+        "--lm-studio-model",
+        default="qwen2.5-coder-3b-instruct",
+        help="Model name as shown in LM Studio.",
+    )
+    parser.add_argument(
+        "--lm-studio-url",
+        default="http://localhost:1234/v1",
+        help="LM Studio OpenAI-compatible base URL.",
+    )
+    parser.add_argument(
+        "--small-model",
+        action="store_true",
+        help=(
+            "Use the simplified prompt designed for models under 7B parameters. "
+            "Adds WRONG/RIGHT examples for Spack syntax and OLE direction."
+        ),
     )
     parser.add_argument(
         "--demo-dedup",
@@ -225,6 +285,72 @@ def call_anthropic(summary: dict[str, Any], model: str) -> list[dict[str, Any]]:
     scenarios = data.get("scenarios", [])
     if not isinstance(scenarios, list) or not scenarios:
         warn("anthropic API returned no scenarios -- using fallback scenarios")
+        return []
+    return scenarios
+
+
+def call_lm_studio(
+    summary: dict[str, Any],
+    model: str,
+    url: str = "http://localhost:1234/v1",
+    system_prompt: str | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Call a local LM Studio server via its OpenAI-compatible endpoint.
+    Returns list[dict] — same type as call_anthropic — so validation and
+    deduplication work unchanged.
+    Pass system_prompt=SMALL_MODEL_SYSTEM_PROMPT for models under 7B.
+    """
+    try:
+        from openai import OpenAI
+    except ImportError:
+        warn("'openai' package not installed; install with: pip install openai")
+        return []
+
+    client = OpenAI(base_url=url, api_key="lm-studio")
+    payload = json.dumps(
+        build_prompt_payload(summary), separators=(",", ":"), ensure_ascii=True
+    )
+    active_prompt = system_prompt if system_prompt is not None else SYSTEM_PROMPT
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            temperature=0.2,
+            max_tokens=900,
+            messages=[
+                {"role": "system", "content": active_prompt},
+                {
+                    "role": "user",
+                    "content": (
+                        "Analyse this Spack summary and return 3 OLE-risk scenarios.\n\n"
+                        + payload
+                    ),
+                },
+            ],
+        )
+    except Exception as exc:
+        warn(f"LM Studio request failed ({exc}); using deterministic fallback scenarios")
+        return []
+
+    if not response.choices:
+        warn("LM Studio returned empty choices (check --lm-studio-url includes /v1); using fallback")
+        return []
+    raw = _strip_fences(response.choices[0].message.content or "")
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        warn(f"LM Studio returned invalid JSON ({exc}); using deterministic fallback scenarios")
+        return []
+
+    # Some models return a bare array instead of {"scenarios":[...]}
+    if isinstance(data, list):
+        scenarios = data
+    else:
+        scenarios = data.get("scenarios", [])
+    if not isinstance(scenarios, list) or not scenarios:
+        warn("LM Studio returned no scenarios -- using fallback scenarios")
         return []
     return scenarios
 
@@ -580,13 +706,29 @@ def main() -> None:
         raw_scenarios = _mock_scenarios()
         source_label = "deterministic-fallback"
     else:
-        info(f"requesting OLE scenarios from model={args.model}")
-        try:
-            raw_scenarios = call_anthropic(summary, model=args.model)
-        except AnthropicUnavailableError as exc:
-            print(exc, file=sys.stderr)
-            sys.exit(3)
-        source_label = "anthropic" if raw_scenarios else "deterministic-fallback"
+        if args.lm_studio:
+            prompt_name = "small-model" if args.small_model else "standard"
+            info(
+                f"requesting OLE scenarios from LM Studio "
+                f"model={args.lm_studio_model} prompt={prompt_name}"
+            )
+            raw_scenarios = call_lm_studio(
+                summary,
+                model=args.lm_studio_model,
+                url=args.lm_studio_url,
+                system_prompt=(
+                    SMALL_MODEL_SYSTEM_PROMPT if args.small_model else None
+                ),
+            )
+            source_label = "lm-studio" if raw_scenarios else "deterministic-fallback"
+        else:
+            info(f"requesting OLE scenarios from model={args.model}")
+            try:
+                raw_scenarios = call_anthropic(summary, model=args.model)
+            except AnthropicUnavailableError as exc:
+                print(exc, file=sys.stderr)
+                sys.exit(3)
+            source_label = "anthropic" if raw_scenarios else "deterministic-fallback"
         if not raw_scenarios:
             raw_scenarios = _mock_scenarios()
 
